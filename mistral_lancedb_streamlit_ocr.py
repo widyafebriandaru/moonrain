@@ -4,6 +4,9 @@ import pandas as pd
 from sentence_transformers import SentenceTransformer
 import requests
 import os
+import easyocr
+from PIL import Image
+import numpy as np
 
 # Initialize session state variables
 if 'new_note' not in st.session_state:
@@ -16,8 +19,14 @@ if 'query' not in st.session_state:
 def load_model_safely():
     return SentenceTransformer("all-MiniLM-L6-v2", device="cpu", trust_remote_code=True)
 
-# Load model
+# Load OCR model once
+@st.cache_resource(show_spinner="Loading OCR model...")
+def load_easyocr():
+    return easyocr.Reader(['en', 'id'])  # support English + Indonesia
+
+# Load models
 model = load_model_safely()
+ocr_reader = load_easyocr()
 
 # Connect to LanceDB
 db = lancedb.connect("my_lancedb")
@@ -60,10 +69,40 @@ try:
 except Exception as e:
     st.sidebar.error(f"Error loading notes: {e}")
 
-# ✅ Main Panel: Ask Assistant
-st.header("🔍 Moonrain")
+# ✅ Main Panel: OCR Upload
+st.header("🖼️ OCR from Image")
+uploaded_file = st.file_uploader("Upload an image for OCR", type=["jpg", "jpeg", "png"])
 
-# Use a form to clear the input after submission
+if uploaded_file is not None:
+    image = Image.open(uploaded_file)
+    st.image(image, caption="Uploaded Image", use_column_width=True)
+
+    # Convert PIL image to numpy
+    img_array = np.array(image)
+
+    # OCR processing
+    with st.spinner("🔎 Extracting text from image..."):
+        ocr_result = ocr_reader.readtext(img_array, detail=0)
+
+    if ocr_result:
+        extracted_text = "\n".join(ocr_result)
+        st.subheader("📖 OCR Result")
+        st.write(extracted_text)
+
+        # Option to insert OCR text to notes
+        if st.button("➕ Save OCR Result to Notes"):
+            vector = model.encode(extracted_text).tolist()
+            table.add(pd.DataFrame({
+                    "text": [extracted_text],
+                    "vector": [vector]
+            }))
+            st.success("OCR text saved to Notes!")
+    else:
+        st.warning("No text detected in the image.")
+
+# ✅ Main Panel: Ask Assistant
+st.header("🔍 Ask Assistant")
+
 with st.form(key='query_form'):
     query = st.text_input("What do you want to know?", value=st.session_state.query, key="query_input")
     submitted = st.form_submit_button("Ask")
@@ -78,10 +117,10 @@ with st.form(key='query_form'):
         # Convert to DataFrame and extract scores
         results_df = pd.DataFrame([{'text': item['text'], 'score': item['_distance']} for item in results])
         
-        # Set similarity threshold (adjust based on your needs)
+        # Set similarity threshold
         SIMILARITY_THRESHOLD = 1.3  # L2 distance threshold
         
-        # Filter results by similarity score
+        # Filter results
         filtered_results = results_df[results_df['score'] <= SIMILARITY_THRESHOLD]
         
         st.subheader("📚 Retrieved Notes")
